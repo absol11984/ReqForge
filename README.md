@@ -1,6 +1,6 @@
-# APIShield – API Rate Limiting Service
+# ReqForge – API Rate Limiting Service
 
-APIShield is a backend-focused REST API that will eventually provide production-grade API rate limiting. **Phase 1** focuses on a clean, working **client management** foundation backed by **PostgreSQL**.
+ReqForge is a backend-focused REST API that will eventually provide production-grade API rate limiting. **Phase 1** focuses on a clean, working **client management** foundation backed by **PostgreSQL**.
 
 ## Phase 1 Features
 
