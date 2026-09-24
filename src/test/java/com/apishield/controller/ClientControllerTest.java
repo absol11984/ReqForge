@@ -6,6 +6,7 @@ import com.apishield.dto.UpdateClientRequest;
 import com.apishield.entity.ClientStatus;
 import com.apishield.exception.ClientNotFoundException;
 import com.apishield.service.ClientService;
+import com.apishield.service.RateLimitService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -36,6 +37,9 @@ class ClientControllerTest {
 
     @MockBean
     private ClientService clientService;
+
+    @MockBean
+    private RateLimitService rateLimitService;
 
     @Test
     void createClient() throws Exception {

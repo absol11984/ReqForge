@@ -4,6 +4,7 @@ API rate limiting service built with Java 21 and Spring Boot 3.3.2.
 
 - **Phase 1** — Client management REST API with PostgreSQL persistence
 - **Phase 2** — Redis-backed Fixed Window rate limiting
+- **Phase 3** — Centralized `OncePerRequestFilter` for API key validation and rate-limit enforcement
 
 ---
 
@@ -201,6 +202,29 @@ ClientService ──► PostgreSQL   │  INCR rate_limit:{apiKey}:{windowId}
 ```
 
 PostgreSQL stores durable client data. Redis stores only the short-lived counters.
+
+---
+
+## Phase 3 — Centralized Filter Architecture
+
+Phase 3 introduces `RateLimitFilter`, moving API key extraction, validation, and rate-limiting out of the individual controllers into a centralized Spring `OncePerRequestFilter`.
+
+### Benefits
+
+1. **Separation of concerns**: Controllers focus exclusively on business logic without repeating auth/rate-limit checks.
+2. **Global enforcement**: Any new protected controller endpoint automatically inherits rate limiting. The filter executes exactly once per request.
+3. **Direct Error Handling**: Standard HTTP 401, 403, and 429 JSON responses are written directly to `HttpServletResponse`, matching the `ErrorResponse` payload format.
+4. **Selective paths**: Management and Swagger endpoints (e.g., `/api/clients`, `/swagger-ui`) bypass the filter, ensuring they remain freely accessible.
+
+### Request Flow
+
+1. Request hits `RateLimitFilter`
+2. Checks exclusion paths (`shouldNotFilter`)
+3. Extracts `X-API-Key` → 401 if missing/invalid
+4. Verifies Client is `ACTIVE` → 403 if inactive
+5. Increments Redis counter → 429 if limit exceeded
+6. Success → appends Rate-Limit headers, proceeds to controller
+7. Controller returns business payload
 
 ---
 
