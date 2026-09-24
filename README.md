@@ -562,7 +562,3 @@ Possible future improvements (not currently implemented):
 - additional protected endpoints and request/response examples
 - optional authentication/authorization for management/observability endpoints
 - additional rate-limiting policies beyond the current three algorithms
-
-## 29. License
-
-## 30. Author / Project Links
