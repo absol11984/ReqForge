@@ -565,10 +565,4 @@ Possible future improvements (not currently implemented):
 
 ## 29. License
 
-No standalone `LICENSE` file was found in the repository root directory.
-
-The OpenAPI metadata in `OpenApiConfig` declares MIT as the API license for the generated OpenAPI document.
-
 ## 30. Author / Project Links
-
-Repository: https://github.com/absol11984/ReqForge
