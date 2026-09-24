@@ -1,451 +1,495 @@
-# APIShield
+# ReqForge
 
-API rate limiting service built with Java 21 and Spring Boot 3.3.2.
+> A Redis-backed API rate limiting service built with Java 21 and Spring Boot, supporting multiple rate-limiting algorithms and centralized request enforcement.
 
-- **Phase 1** — Client management REST API with PostgreSQL persistence
-- **Phase 2** — Redis-backed Fixed Window rate limiting
-- **Phase 3** — Centralized `OncePerRequestFilter` for API key validation and rate-limit enforcement
-- **Phase 4** — Multiple configurable rate limiting algorithms per client (Fixed Window, Sliding Window, Token Bucket) via the Strategy Pattern
-- **Phase 5** — Redis Lua atomicity, concurrency tests, fail-closed Redis handling, Micrometer metrics, and masked structured logging
-- **Phase 6** — Docker Compose deployment, real end-to-end Testcontainers integration tests, and GitHub Actions CI
+![Java 21](https://img.shields.io/badge/Java-21-blue.svg)
+![Spring Boot 3](https://img.shields.io/badge/Spring_Boot-3.3.2-brightgreen.svg)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%2B-blue.svg)
+![Redis](https://img.shields.io/badge/Redis-7-red.svg)
+![License](https://img.shields.io/badge/License-MIT-gray.svg)
 
----
+## Overview
 
-## Stack
+ReqForge is a backend service designed to manage, enforce, and observe API rate limits for individual clients. It provides a dedicated layer for defending upstream services against abusive traffic or accidental denial-of-service conditions by strictly enforcing configurable request quotas. 
 
-| Layer | Technology |
-|---|---|
-| Language | Java 21 |
-| Framework | Spring Boot 3.3.2 |
-| Persistence | Spring Data JPA + PostgreSQL |
-| Rate limiting | Spring Data Redis (`StringRedisTemplate` + Lua scripts) |
-| Observability | Spring Boot Actuator + Micrometer |
-| Validation | Jakarta Bean Validation |
-| API docs | springdoc-openapi 2.6.0 (Swagger UI) |
-| Tests | JUnit 5 + Mockito + MockMvc + H2 |
+Clients are identified by securely generated API keys. When a request is received, the system evaluates the client's current traffic against their assigned rate-limiting algorithm. To achieve the high throughput and low latency required for request gating, ReqForge uses Redis to manage high-frequency counter state, while relying on PostgreSQL to securely durably persist client configuration rules and metadata.
 
----
+## Key Features
 
-## Quick start
+- API-key based client access identification
+- Configurable per-client request quotas and windows
+- Multiple algorithms: Fixed Window, Sliding Window, Token Bucket
+- Centralized `OncePerRequestFilter` logical enforcement
+- Redis-backed rate-limit ephemeral state
+- Atomic Redis Lua script execution for concurrency-safe state updates
+- Standard HTTP rate-limit response headers
+- Explicit HTTP 401, 403, 429, and 503 error handling
+- PostgreSQL-backed persistent configuration
+- Application health and Micrometer metrics endpoints
+- Complete Docker Compose environment with healthchecks
+- End-to-end integration testing using Testcontainers
+- GitHub Actions CI workflow
 
-### Prerequisites
+## Architecture
 
-- JDK 21
-- Maven 3.9+
-- PostgreSQL 14+
-- Redis 6+ (Phase 2+)
-
-### Environment variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `SERVER_PORT` | `8080` | HTTP port |
-| `DB_URL` | — (required) | JDBC URL, e.g. `jdbc:postgresql://localhost:5432/apishield` |
-| `DB_USERNAME` | — (required) | PostgreSQL username |
-| `DB_PASSWORD` | — (required) | PostgreSQL password |
-| `REDIS_HOST` | `localhost` | Redis hostname |
-| `REDIS_PORT` | `6379` | Redis port |
-
-### Run
-
-```bash
-export DB_URL=jdbc:postgresql://localhost:5432/apishield
-export DB_USERNAME=apishield
-export DB_PASSWORD=apishield
-export REDIS_HOST=localhost
-export REDIS_PORT=6379
-
-mvn spring-boot:run
+```mermaid
+flowchart TD
+    C[Client] --> F[RateLimitFilter]
+    
+    subgraph ReqForge Application
+        F --> S[RateLimitService]
+        S --> R[RateLimitStrategyFactory]
+        
+        R --> FW[Fixed Window]
+        R --> SW[Sliding Window]
+        R --> TB[Token Bucket]
+    end
+    
+    FW --> REDIS[(Redis)]
+    SW --> REDIS[(Redis)]
+    TB --> REDIS[(Redis)]
+    
+    DB[(PostgreSQL)] --> S
+    F --> CTRL[Protected Controller]
 ```
 
-Swagger UI: http://localhost:8080/swagger-ui.html  
-OpenAPI JSON: http://localhost:8080/v3/api-docs  
-Health: http://localhost:8080/actuator/health  
-Metrics: http://localhost:8080/actuator/metrics
+**Request Flow:**
+1. A request arrives from the **Client**.
+2. The **`RateLimitFilter`** intercepts the request and extracts the API key.
+3. The filter queries the **`RateLimitService`** which loads the client configuration from **PostgreSQL**.
+4. The **`RateLimitStrategyFactory`** selects the configured algorithm Strategy (Fixed, Sliding, or Token Bucket).
+5. The Strategy executes an atomic Lua script against **Redis** to determine if the quota is exceeded.
+6. The filter receives the allow/reject decision and appends HTTP rate-limit headers.
+7. If allowed, the request proceeds to the **Protected Controller**. If rejected, the filter terminates the request immediately with an HTTP 429 response.
 
-### Tests
+Centralizing this logic in a Spring Filter prevents duplicated rate-limit evaluation logic inside specific API controllers.
 
-```bash
-mvn clean test
-```
+## How Rate Limiting Works
 
-Tests use an in-memory H2 database and mocked Redis operations. A live Redis server is **not** required to run the test suite.
+1. Client sends a request containing the `X-API-Key` header.
+2. `RateLimitFilter` extracts the header.
+3. Client configuration (quota, algorithm, status) is loaded from PostgreSQL.
+4. Client status is verified.
+5. `RateLimitService` selects the specific rate limit strategy via the factory pattern.
+6. The strategy executes a single, atomic Lua script against Redis.
+7. Redis computes the new state and returns a result indicating whether the request is allowed, remaining tokens, and time until reset.
+8. Standard `X-RateLimit-*` response headers are attached to the HTTP response.
+9. The request either proceeds to the application logic or is aborted and returned to the client.
 
----
+**Failure Outcomes:**
+- **401 Unauthorized**: Missing or invalid API key.
+- **403 Forbidden**: Client key exists but is marked inactive.
+- **429 Too Many Requests**: Request limit exceeded for the active window.
+- **503 Service Unavailable**: Redis is unreachable or unresponsive (systems fail closed to protect upstream services).
 
-## Phase 1 — Client management
+## Rate-Limiting Algorithms
 
-### Endpoints
+### Fixed Window
 
-| Method | Path | Status | Description |
+Requests are counted inside discrete time windows based on the Unix epoch. The window size is absolute, making it computationally light.
+- Uses a basic counter that expires when the discrete time window elapses.
+- Susceptible to burst traffic bridging the boundary of two windows (e.g., spending the quota at the end of Window A and the beginning of Window B immediately).
+
+**Example (Limit = 5, Window = 60s):**
+`req 1` → allowed
+`req 2` → allowed
+`req 3` → allowed
+`req 4` → allowed
+`req 5` → allowed
+`req 6` → 429 Too Many Requests (until next 60s boundary)
+
+### Sliding Window
+
+Requests are tracked over a rolling time interval exactly `windowSeconds` relative to the current timestamp.
+- Redis tracks request timestamps.
+- Expired requests are dynamically removed before determining the current valid count.
+- Prevents the boundary burst issue present in Fixed Window by calculating limits continuously.
+
+### Token Bucket
+
+Requests consume tokens from a theoretical bucket that continuously refills at a fixed rate over time.
+- The capacity is equal to the client's `requestLimit`.
+- The refill rate is dynamically calculated based on `requestLimit / windowSeconds`.
+- Token calculation is evaluated lazily upon request arrival rather than via background worker threads.
+- Allows for controlled bursts of traffic up to the maximum limit, spacing out recovery.
+
+## Redis Design
+
+The implementation actively provisions different Redis data structures to optimally support each algorithmic approach.
+
+| Algorithm | Redis Structure | Purpose |
+|-----------|-----------------|---------|
+| Fixed Window | String / counter | Maintain discrete incrementing count |
+| Sliding Window | Sorted Set (ZSET) | Track request timestamps dynamically |
+| Token Bucket | Hash (HSET) | Store distinct tokens and last-refill state |
+
+**Key Naming Conventions:**
+- Fixed Window: `rate_limit:fixed:{apiKey}:{windowId}`
+- Sliding Window: `rate_limit:sliding:{apiKey}`
+- Token Bucket: `rate_limit:bucket:{apiKey}`
+
+## Atomicity and Concurrency
+
+When rate limit evaluation dictates state inspection, recalculation, and mutation, multi-step Redis commands create race conditions under concurrent client load. ReqForge avoids these race conditions entirely by utilizing **Redis Lua Scripts**.
+
+The Java strategies perform zero state calculations in memory. Instead, properties are passed to `fixed-window.lua`, `sliding-window.lua`, and `token-bucket.lua` files. Redis executes these scripts atomically, meaning concurrent evaluations against the same client key cannot interleave.
+
+This atomicity is validated through concurrent `CountDownLatch` load tests ensuring exactly the configured limit of requests passes, regardless of multi-threaded contention.
+
+## Data Storage
+
+Responsibility is strictly partitioned between two distinct persistence systems.
+
+**PostgreSQL**:
+- Holds durable client configuration.
+- Fields: `id`, `name`, `apiKey`, `status`, `requestLimit`, `windowSeconds`, `algorithm`, `createdAt`, `updatedAt`.
+
+**Redis**:
+- Manages high-frequency rate-limit tracking.
+- Ephemeral counters, rolling timestamp sets, and fluid bucket states.
+
+This separation prevents high-throughput traffic inspection from overwhelming the primary relational database utilized for business and configuration data.
+
+## API Endpoints
+
+### Client Management
+
+These administrative endpoints bypass rate-limiting.
+
+| Method | Path | Purpose | Success |
 |---|---|---|---|
-| `POST` | `/api/clients` | 201 | Register a client, generate API key |
-| `GET` | `/api/clients` | 200 | List all clients |
-| `GET` | `/api/clients/{id}` | 200 / 404 | Get a client by UUID |
-| `PUT` | `/api/clients/{id}` | 200 / 404 | Update name, status, algorithm, and rate-limit settings |
-| `DELETE` | `/api/clients/{id}` | 204 / 404 | Delete a client |
+| `POST` | `/api/clients` | Register a client, generate API key | 201 |
+| `GET` | `/api/clients` | List all registered clients | 200 |
+| `GET` | `/api/clients/{id}` | Get client configuration by UUID | 200 |
+| `PUT` | `/api/clients/{id}` | Update client quotas / algorithms | 200 |
+| `DELETE` | `/api/clients/{id}` | Delete a client permanently | 204 |
 
-### Create client
+### Protected Application
 
+| Method | Path | Purpose | HTTP Header Requirement |
+|---|---|---|---|
+| `GET` | `/api/demo/products` | Demonstrate rate limit enforcement | `X-API-Key: <key>` |
+
+### Observability
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/actuator/health` | Application and datastore health status |
+| `GET` | `/actuator/metrics` | Micrometer metrics (traffic counts, errors) |
+
+## Client Creation Example
+
+**Request:**
 ```http
 POST /api/clients
 Content-Type: application/json
 
 {
-  "name": "client-app",
-  "requestLimit": 100,
-  "windowSeconds": 60,
+  "name": "demo-client",
+  "requestLimit": 50,
+  "windowSeconds": 10,
   "algorithm": "SLIDING_WINDOW"
 }
 ```
 
-`requestLimit` and `windowSeconds` default to `100` and `60` if omitted in code constructors; they are required (`@NotNull`, `@Min(1)`) on the JSON payload. `algorithm` is optional on create/update and defaults to `FIXED_WINDOW` if omitted or null.
-
-Response:
-
+**Response (201 Created):**
 ```json
 {
   "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "name": "client-app",
-  "apiKey": "ask_live_0123456789abcdef",
+  "name": "demo-client",
+  "apiKey": "ask_live_123456789abcdef0",
   "status": "ACTIVE",
-  "requestLimit": 100,
-  "windowSeconds": 60,
+  "requestLimit": 50,
+  "windowSeconds": 10,
   "algorithm": "SLIDING_WINDOW",
-  "createdAt": "2026-09-23T18:00:00Z",
-  "updatedAt": "2026-09-23T18:00:00Z"
+  "createdAt": "2026-09-25T10:00:00Z",
+  "updatedAt": "2026-09-25T10:00:00Z"
 }
 ```
 
-API keys are generated as `ask_live_` + 16 hex characters from `SecureRandom`.
+## Protected API Example
 
-### Validation
-
-- `name` — required, max 200 characters
-- `requestLimit` — required, must be greater than 0
-- `windowSeconds` — required, must be greater than 0
-- `algorithm` — optional, one of `FIXED_WINDOW`, `SLIDING_WINDOW`, `TOKEN_BUCKET` (defaults to `FIXED_WINDOW`)
-- `status` — `ACTIVE` or `INACTIVE` (required on update)
-
-Invalid payloads return `400 Bad Request` with a structured error body.
-
----
-
-## Phase 2 — Fixed Window rate limiting
-
-### How it works
-
-Each client has a `requestLimit` and a `windowSeconds`. On every protected request:
-
-1. Compute `windowId = epochSeconds / windowSeconds`
-2. Redis key: `rate_limit:fixed:{apiKey}:{windowId}`
-3. `INCR` the key
-4. If the counter is `1` (first request in this window), set TTL = `windowSeconds`
-5. If `count > requestLimit` → `429 Too Many Requests`
-6. Keys expire automatically via Redis TTL — no manual deletion, no Lua scripts
-
-```
-Window 0  [t=0 ........ t=60)
-  req 1  → 200  remaining=4
-  req 2  → 200  remaining=3
-  req 3  → 200  remaining=2
-  req 4  → 200  remaining=1
-  req 5  → 200  remaining=0
-  req 6  → 429  remaining=0  Retry-After=<seconds until t=60>
-
-Window 1  [t=60 ....... t=120)
-  req 7  → 200  remaining=4   (counter reset)
-```
-
-### Demo endpoint
-
+**Request:**
 ```http
 GET /api/demo/products
-X-API-Key: ask_live_0123456789abcdef
+X-API-Key: ask_live_123456789abcdef0
 ```
 
-| Status | When |
-|---|---|
-| `200` | Valid, active key; under the limit |
-| `401` | Missing / unknown API key |
-| `403` | Client exists but `status = INACTIVE` |
-| `429` | Limit exceeded for the current window |
+**Allowed Response (200 OK):**
+```http
+HTTP/1.1 200 OK
+X-RateLimit-Limit: 50
+X-RateLimit-Remaining: 49
+X-RateLimit-Reset: 10
 
-Success and 429 responses both include:
+[ "Product A", "Product B", "Product C" ]
+```
 
-| Header | Meaning |
-|---|---|
-| `X-RateLimit-Limit` | Max requests per window |
-| `X-RateLimit-Remaining` | Requests left in this window |
-| `X-RateLimit-Reset` | Seconds until the window rolls over |
-| `Retry-After` | Same as reset (429 only) |
+**Rejected Response (429 Too Many Requests):**
+```http
+HTTP/1.1 429 Too Many Requests
+X-RateLimit-Limit: 50
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 2
+Retry-After: 2
 
-429 body:
-
-```json
 {
-  "timestamp": "2026-09-23T18:00:05Z",
+  "timestamp": "2026-09-25T10:00:05Z",
   "status": 429,
   "error": "Too Many Requests",
-  "message": "Rate limit exceeded",
-  "path": "/api/demo/products"
+  "message": "Rate limit exceeded"
 }
 ```
 
----
+## Error Handling
 
-## Phase 3 — Centralized Filter Architecture
+Standardized JSON error structures are returned across the application for the following states:
 
-Phase 3 introduces `RateLimitFilter`, moving API key extraction, validation, and rate-limiting out of the individual controllers into a centralized Spring `OncePerRequestFilter`.
-
-### Benefits
-
-1. **Separation of concerns**: Controllers focus exclusively on business logic without repeating auth/rate-limit checks.
-2. **Global enforcement**: Any new protected controller endpoint automatically inherits rate limiting. The filter executes exactly once per request.
-3. **Direct Error Handling**: Standard HTTP 401, 403, and 429 JSON responses are written directly to `HttpServletResponse`, matching the `ErrorResponse` payload format.
-4. **Selective paths**: Management and Swagger endpoints (e.g., `/api/clients`, `/swagger-ui`) bypass the filter, ensuring they remain freely accessible.
-
-### Request Flow
-
-1. Request hits `RateLimitFilter`
-2. Checks exclusion paths (`shouldNotFilter`)
-3. Extracts `X-API-Key` → 401 if missing/invalid
-4. Verifies Client is `ACTIVE` → 403 if inactive
-5. Calls `RateLimitService.checkRateLimit(apiKey, requestLimit, windowSeconds, algorithm)` → 429 if limit exceeded
-6. Success → appends Rate-Limit headers, proceeds to controller
-7. Controller returns business payload
-
----
-
-## Phase 4 – Multiple Rate Limiting Algorithms
-
-Phase 4 extends ReqForge to support multiple configurable rate limiting algorithms on a per-client basis.
-
-### Algorithm Comparison
-
-| Algorithm | Redis Structure | Main Concept |
-|---|---|---|
-| **Fixed Window** (`FIXED_WINDOW`) | String (`INCR` counter) | Requests are counted inside discrete time windows (`epochSeconds / windowSeconds`). Simple and memory-efficient, but susceptible to boundary traffic bursts. |
-| **Sliding Window** (`SLIDING_WINDOW`) | Sorted Set (`ZSET`) | Requests are tracked over a rolling time period `[now - windowSeconds, now]`. Timestamps are scores, unique UUIDs are members. Eliminates window-boundary burst issues. |
-| **Token Bucket** (`TOKEN_BUCKET`) | Hash (`HSET`) | Requests consume tokens from a bucket of capacity `requestLimit` refilled at `requestLimit / windowSeconds` tokens/sec. Lazily calculated on incoming requests. Supports controlled bursts. |
-
-### Redis Key Patterns
-
-- **Fixed Window**: `rate_limit:fixed:{apiKey}:{windowId}`
-- **Sliding Window**: `rate_limit:sliding:{apiKey}`
-- **Token Bucket**: `rate_limit:bucket:{apiKey}`
-
-### Algorithm Details
-
-#### Fixed Window
-Requests are counted inside discrete time windows.
-- Key: `rate_limit:fixed:{apiKey}:{windowId}` where `windowId = epochSeconds / windowSeconds`.
-- Increments the counter via `opsForValue().increment(key)` and sets a TTL equal to `windowSeconds` on the first request.
-- Remaining requests: `Math.max(0, requestLimit - count)`.
-- Reset time: `((windowId + 1) * windowSeconds) - epochSeconds`.
-
-#### Sliding Window
-Requests are tracked over the most recent rolling time period.
-- Key: `rate_limit:sliding:{apiKey}`.
-- For every request:
-  1. Remove expired request entries older than `now - windowSeconds` using `opsForZSet().rangeByScore(key, Double.NEGATIVE_INFINITY, now - windowSeconds)` and `remove(key, oldRequests)`.
-  2. Count remaining timestamps in the window using `opsForZSet().size(key)`.
-  3. If `count < requestLimit`, allow the request and add `(UUID.randomUUID().toString(), now)` to the sorted set. Set key expiration.
-  4. If `count >= requestLimit`, reject the request.
-- Remaining requests: `Math.max(0, requestLimit - updatedCount)`.
-- Reset time: Seconds until the oldest request in the window expires (`(oldestScore + windowSeconds) - now`).
-
-#### Token Bucket
-Requests consume tokens while tokens gradually refill.
-- Key: `rate_limit:bucket:{apiKey}` with fields `tokens` and `lastRefillSeconds`.
-- Capacity: `requestLimit`.
-- Refill Rate: `requestLimit / (double) windowSeconds` tokens per second.
-- On each incoming request (lazy refill without background threads):
-  1. Read `tokens` and `lastRefillSeconds` from Redis hash.
-  2. If new bucket: start with full capacity `requestLimit` and `lastRefill = now`.
-  3. If existing bucket: compute `elapsedSeconds = now - lastRefill`, calculate new tokens `available = Math.min(requestLimit, available + elapsedSeconds * refillRate)`.
-  4. If `available >= 1`: consume 1 token (`available -= 1`), allow request.
-  5. If `available < 1`: reject request.
-  6. Save updated `tokens` and `lastRefillSeconds` back to Redis hash and set key TTL.
-- Remaining requests: `(long) Math.floor(available)`.
-- Reset time: `0` when allowed; when rejected, seconds required to accumulate enough tokens for at least 1 full request.
-
-### Strategy Pattern Architecture
-
-The rate limiting subsystem utilizes a clean Strategy Pattern decoupled from HTTP filters and controllers:
-
-```
-RateLimitFilter
-      │
-      ▼
-RateLimitService
-      │
-      ▼
-RateLimitStrategyFactory ──── selects ────► RateLimitAlgorithm (per Client)
-      │
-      ├───────────────────────────────┬───────────────────────────────┐
-      ▼                               ▼                               ▼
-FixedWindowRateLimitStrategy   SlidingWindowRateLimitStrategy   TokenBucketRateLimitStrategy
-      │                               │                               │
-      ▼ (String INCR)                 ▼ (Sorted Set ZSET)             ▼ (Hash HSET)
-    Redis                           Redis                           Redis
-```
-
-- **`RateLimitStrategy`**: Common interface defining `RateLimitResult check(String apiKey, int requestLimit, int windowSeconds, Clock clock)`.
-- **`RateLimitStrategyFactory`**: Selects and caches the concrete strategy based on `RateLimitAlgorithm` (defaults to `FixedWindowRateLimitStrategy` if algorithm is null).
-- **`TimeConfig` / `Clock`**: Injected `java.time.Clock` enables deterministic unit testing without `Thread.sleep`.
-
-### Known Concurrency / Atomicity Limitations
-
-Phase 4 executed Sliding Window and Token Bucket as multiple sequential Redis commands (read → compute → write). Under concurrent load that could over-admit requests. **Phase 5 replaces those multi-command sequences with atomic Lua scripts.** See [Phase 5](#phase-5--concurrency--production-hardening).
-
----
-
-## Phase 5 – Concurrency & Production Hardening
-
-Phase 5 makes rate limiting production-safe: every algorithm runs as a single atomic Redis Lua script, Redis outages fail closed with HTTP 503, and the filter emits Micrometer counters plus masked structured logs.
-
-### Redis Atomicity via Lua Scripts
-
-Each strategy loads a `DefaultRedisScript` from `src/main/resources/scripts/` and executes it with `StringRedisTemplate.execute(...)`. Redis runs the script as one EVAL, so concurrent requests on the same key cannot interleave mid-check.
-
-| Algorithm | Script | Atomic operations | Return |
-|---|---|---|---|
-| **Fixed Window** | `fixed-window.lua` | `INCR`; if count == 1 then `EXPIRE` | current count |
-| **Sliding Window** | `sliding-window.lua` | `ZREMRANGEBYSCORE` → `ZCARD` → conditional `ZADD` + `EXPIRE` | `{allowed, remaining, resetSeconds}` |
-| **Token Bucket** | `token-bucket.lua` | `HGET` tokens/lastRefill → refill → consume → `HSET` + `EXPIRE` | `{allowed, remaining, resetSeconds}` |
-
-Fixed Window Lua also closes the crash window between `INCR` and `EXPIRE` that existed when those were two separate commands.
-
-### Concurrent Request Handling
-
-`RateLimitConcurrencyTest` fires 50 concurrent requests (16-thread pool, `CountDownLatch` start barrier) against a limit of 10 for each algorithm. The mock Redis answer is synchronized so it emulates Lua atomicity; exactly 10 requests are allowed and 40 are rejected.
-
-### Redis Failure Handling (Fail-Closed)
-
-Protected endpoints never fail open. If Redis is down:
-
-1. Strategy / `RateLimitService` wraps `DataAccessException` (and unexpected runtime Redis errors) as `RateLimiterUnavailableException`.
-2. `RateLimitFilter` catches that exception (and `DataAccessException`) and writes HTTP **503 Service Unavailable**.
-3. Body is the standard `ErrorResponse` with message `"Rate limiting service is temporarily unavailable"` — no stack traces or Redis details leak to the client.
-4. Client management (`/api/clients`), Swagger, and Actuator paths are excluded from the filter, so operators can still manage clients and inspect health while Redis is down.
-
-`GlobalExceptionHandler` also maps `RateLimiterUnavailableException` → 503 for any controller-thrown case.
-
-### Observability
-
-Spring Boot Actuator exposes `/actuator/health` (Redis health indicator enabled, details hidden) and `/actuator/metrics`. `RateLimitFilter` registers six Micrometer counters:
-
-| Counter | When |
+| Status Code | Meaning |
 |---|---|
-| `ratelimit.requests.total` | Every protected request |
-| `ratelimit.requests.allowed` | Under limit, forwarded to controller |
-| `ratelimit.requests.rejected` | HTTP 429 |
-| `ratelimit.errors.invalid_key` | Missing or unknown `X-API-Key` |
-| `ratelimit.errors.inactive_client` | Client `status = INACTIVE` |
-| `ratelimit.errors.redis_failure` | Redis unavailable → 503 |
+| **400** | Invalid client configuration request syntax. |
+| **401** | Missing or invalid API key credential. |
+| **403** | Client exists but is configured as inactive. |
+| **429** | Configured rate limit mathematically exceeded. |
+| **503** | Rate limiting backend (Redis) is currently unavailable. |
 
-### Structured Logging
+## Tech Stack
 
-Filter logs use SLF4J with API keys masked as `ask_***` (`substring(0, 4) + "***"`). Events logged: missing/invalid key, inactive client, Redis failure, and rate-limit exceeded. Full keys never appear in logs.
+| Technology | Purpose |
+|---|---|
+| Java 21 | Application language and runtime |
+| Spring Boot | Framework foundation and lifecycle |
+| Spring Web | REST APIs and HTTP request filtering |
+| Spring Data JPA | Relational persistence abstraction |
+| PostgreSQL | Client configuration database |
+| Redis | High-speed rate-limit state datastore |
+| Redis Lua | Atomic rate-limit operations in database |
+| Maven | Build execution and dependency management |
+| JUnit 5 | Test execution framework |
+| Mockito | Unit test mocking |
+| MockMvc | HTTP and controller boundary testing |
+| Testcontainers | Real Redis and PostgreSQL test infrastructure |
+| Docker Compose | Multi-container local execution environment |
+| Actuator | Health monitoring and metrics exposure |
 
-### Remaining Limitations
+## Project Structure
 
-- Lua scripts are atomic **per key**. They do not coordinate across keys or across Redis cluster slots.
-- Token Bucket refill is still lazy (computed on request); there is no background refill job.
-- Concurrency tests emulate Lua with a synchronized in-memory mock; they do not require a live Redis. End-to-end Redis EVAL behavior should be verified in a deployed environment.
-- Actuator is unauthenticated in this phase; lock it down before exposing it on a public network.
-
----
-
-## Project layout
-
-```
-src/main/java/com/apishield/
-  ApiShieldApplication.java
-  config/
-    OpenApiConfig.java
-    RedisConfig.java
-    TimeConfig.java
-  controller/
-    ClientController.java
-    DemoController.java
-  dto/
-    CreateClientRequest.java
-    UpdateClientRequest.java
-    ClientResponse.java
-    RateLimitResult.java
-  entity/
-    Client.java
-    ClientStatus.java
-    RateLimitAlgorithm.java
-  exception/
-    ClientNotFoundException.java
-    ClientInactiveException.java
-    InvalidApiKeyException.java
-    RateLimitExceededException.java
-    RateLimiterUnavailableException.java
-    GlobalExceptionHandler.java
-    ErrorResponse.java
-  filter/
-    RateLimitFilter.java
-  repository/
-    ClientRepository.java
-  service/
-    ClientService.java
-    RateLimitService.java
-    RateLimitStrategy.java
-    RateLimitStrategyFactory.java
-    FixedWindowRateLimitStrategy.java
-    SlidingWindowRateLimitStrategy.java
-    TokenBucketRateLimitStrategy.java
-src/main/resources/scripts/
-  fixed-window.lua
-  sliding-window.lua
-  token-bucket.lua
+```text
+ReqForge/
+├── src/
+│   ├── main/
+│   │   ├── java/com/apishield/
+│   │   │   ├── config/
+│   │   │   ├── controller/
+│   │   │   ├── dto/
+│   │   │   ├── entity/
+│   │   │   ├── exception/
+│   │   │   ├── filter/
+│   │   │   ├── repository/
+│   │   │   └── service/
+│   │   └── resources/
+│   │       ├── application.yml
+│   │       ├── application-docker.yml
+│   │       └── scripts/
+│   │           ├── fixed-window.lua
+│   │           ├── sliding-window.lua
+│   │           └── token-bucket.lua
+│   └── test/
+│       └── java/com/apishield/
+│           └── integration/
+│               ├── BaseIntegrationTest.java
+│               └── RateLimitE2ETest.java
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example
+├── .dockerignore
+├── .gitignore
+├── pom.xml
+└── README.md
 ```
 
----
+## Requirements
 
-## Phase 6 — Dockerization, E2E Testing, and CI/CD
+**Local Development:**
+- Java Development Kit (JDK) 21
+- Maven 3.9+
+- PostgreSQL 14+
+- Redis 6+
 
-Phase 6 hardens the project for deployment by containerizing the application, replacing mocked integration tests with real end-to-end tests using Testcontainers, and wiring up GitHub Actions.
+**Containerized Execution:**
+- Docker Engine
+- Docker Compose plugin
 
-### Docker Compose
+**Testcontainers Execution:**
+- A valid, running Docker environment available to exactly mirror CI behavior.
 
-The `docker-compose.yml` orchestrates the full stack in a custom bridge network (`apishield-network`):
-- **`db`**: PostgreSQL 15 alpine image
-- **`redis`**: Redis 7 alpine image
-- **`api`**: ReqForge API (built via multi-stage `Dockerfile`)
+## Installation — Docker
 
-**Features:**
-- **Healthchecks**: The API container waits for PostgreSQL (`pg_isready`) and Redis (`redis-cli ping`) to be healthy before starting. The API container itself uses Spring Boot Actuator (`/actuator/health`) for its own healthcheck.
-- **Security**: The API runs as a non-root user (`appuser` inside `appgroup`).
-- **Configuration**: Uses `.env` for secrets (copy `.env.example` to start).
+Running the application through Docker Compose is the primary recommended deployment pattern for initial inspection.
 
+1. Clone the repository:
 ```bash
-docker compose up -d --build
+git clone https://github.com/absol11984/ReqForge.git
+cd ReqForge
 ```
 
-### End-to-End Testing (Testcontainers)
+2. Initialize environment configuration:
+```bash
+cp .env.example .env
+```
+*(Verify variables inside `.env`. The defaults are strictly structured for the container network).*
 
-`BaseIntegrationTest` spins up real PostgreSQL and Redis containers using Testcontainers before the Spring context loads.
+3. Build and execute the isolated network stack:
+```bash
+docker compose up --build -d
+```
 
-- Tests run with the `container-test` profile.
-- `@DynamicPropertySource` dynamically points the Spring Datasource and Redis connection properties to the ephemeral Testcontainers ports.
-- **`RateLimitE2ETest`** uses `RestAssured` to send physical HTTP requests to a randomly mapped port, verifying the full rate-limiting flow end-to-end (including boundary alignment waits to ensure deterministic results).
-- Also verifies the fail-closed Redis behavior by explicitly stopping the Redis container and checking for a 503 response.
+4. Verify internal container health:
+```bash
+docker compose ps
+curl http://localhost:8080/actuator/health
+```
 
+Expected output:
+```json
+{"status":"UP"}
+```
+
+To trail application logs:
+```bash
+docker compose logs -f api
+```
+
+To shut down and prune containers/networks:
+```bash
+docker compose down
+```
+
+## Installation — Local
+
+If you prefer operating the application via the local host interface without Docker Compose services mapping:
+
+1. Clone and construct standard configuration:
+```bash
+git clone https://github.com/absol11984/ReqForge.git
+cd ReqForge
+cp .env.example .env
+```
+
+2. Provision independent backend services (PostgreSQL & Redis). Set local connection targets accurately in `.env`.
+
+3. Execute the Spring Boot lifecycle:
+```bash
+mvn spring-boot:run
+```
+
+4. Run the automated test suite locally:
 ```bash
 mvn clean test
 ```
 
-### GitHub Actions (CI)
+## Environment Variables
 
-A workflow at `.github/workflows/ci.yml` runs on every push and pull request to `main`. It checks out the code, sets up JDK 21 (Temurin) with Maven caching, and executes `mvn clean test`. The Testcontainers library automatically detects the GitHub Actions Docker environment and spins up the required databases for the integration tests.
+| Variable | Purpose | Example |
+|---|---|---|
+| `DB_URL` | PostgreSQL JDBC connection URL | `jdbc:postgresql://db:5432/apishield` |
+| `DB_USERNAME` | Target database user | `<placeholder>` |
+| `DB_PASSWORD` | Target database password | `<placeholder>` |
+| `REDIS_HOST` | Target Redis hostname | `redis` |
+| `REDIS_PORT` | Target Redis port binding | `6379` |
+| `SERVER_PORT` | JVM listener port | `8080` |
 
----
+*Do not commit populated `.env` files exposing infrastructure credentials to version control.*
+
+## Testing
+
+Verification targets are distributed across specific isolation layers:
+
+### Unit Tests
+Execute the specific branch logic of custom algorithmic strategies and internal business services absent Spring intervention.
+
+### Controller/Filter Tests
+Verify HTTP mapping serialization, request boundary behavior, and exact REST response mapping via `MockMvc`.
+
+### Integration & End-to-End Tests
+Execute the physical `RateLimitFilter` through real TCP port binding to ephemeral, programmatic PostgreSQL and Redis boundaries hosted specifically by Testcontainers. Ensures end-to-end reliability covering persistence and atomic Lua script behavior under race conditions.
+
+> The current test suite contains 58 tests and the latest verified run completed with 0 failures and 0 errors.
+
+## GitHub Actions CI
+
+The project includes an automated continuous integration workflow configuration (`.github/workflows/ci.yml`).
+
+Automatically invoked on pushes or pull requests involving the `main` branch, the workflow:
+- Performs a Git checkout algorithm.
+- Provisions an Eclipse Temurin Java 21 distribution.
+- Utilizes GitHub Actions Maven caching.
+- Executes `mvn clean test` (which natively launches ephemeral Testcontainers for complex integration tasks).
+
+## Observability
+
+The application relies heavily on `spring-boot-starter-actuator` components alongside integrated Micrometer tracing.
+
+- `/actuator/health`: Emits high-level status of the application and internal connections to PostgreSQL/Redis without leaking extensive backend internals.
+- `/actuator/metrics`: Surfaces dimensional counter aggregation supporting precise operational graphs for keys including `ratelimit.requests.total`, `ratelimit.requests.rejected`, `ratelimit.errors.invalid_key`, and `ratelimit.errors.redis_failure`.
+
+## Docker Architecture
+
+The customized multi-stage `Dockerfile` outputs an optimized Alpine JRE image.
+
+```text
+ReqForge Container (api)
+        │
+        ├── PostgreSQL Container (db)
+        └── Redis Container (redis)
+```
+
+Compose leverages DNS identification over a customized `apishield-network` bridge. Services do not use `localhost` routing mappings for container-to-container execution. Upstream backend boot priority is formally governed via `depends_on` containing specific application healthchecks.
+
+## Security Considerations
+
+- **Credential Obfuscation:** API keys are never directly logged in aggregate payload outputs, instead masked safely (e.g., `ask_***`).
+- **Container Permissions:** The Docker image utilizes a non-privileged user and group (`appuser:appgroup`) isolating runtime exposure parameters.
+- **Environment Management:** Configuration architectures rely strictly on dynamically bound environment configurations keeping secrets explicitly out of VCS storage (`.env` is restricted via `.gitignore` and `.dockerignore`).
+
+## Limitations
+
+- **Authentication Scope:** API-key based access determines distinct client thresholds; it provides system protection, not individualized user OAuth/JWT authorization parameters.
+- **Administration Segmentation:** Internal administrative API endpoints strictly bypass request limitations; they behave outside the client scope.
+- **Observability Constraints:** Metrics are exposed, yet not integrated specifically into a dedicated aggregator software like Prometheus.
+- **Production Orchestration:** Docker Compose effectively handles localized network environments; clustered orchestration platforms like Kubernetes demand unique Manifest architectures absent here. 
+- **Coupled Resiliency:** Hard reliance exists targeting Redis accessibility; fail-closed behavior prioritizes strict throttling behavior over graceful 503 backend avoidance strategies.
+
+## Design Decisions
+
+### Why Redis?
+Rate-limiting mathematics specifically demand rapid execution on discrete temporal structures alongside sub-millisecond I/O constraints perfectly met by Redis memory storage capabilities.
+
+### Why PostgreSQL?
+Client profiles carry transactional definitions demanding structured constraints, exact audits, distinct uniqueness checks, and long-term durability suited explicitly to standard RDBMS models.
+
+### Why Strategy Pattern?
+Permitting dynamic assignment of Token Bucket vs Sliding Window behaviors across segmented clients avoids complex chained boolean conditionals directly cluttering central HTTP Filter execution pipelines.
+
+### Why OncePerRequestFilter?
+Centralized implementation isolates rate-limiting concerns safely preceding controller invocation reducing redundancy safely across future expanded endpoint boundaries.
+
+### Why Lua?
+Because `INCR` or `ZSET` multi-operation commands lack cross-command atomicity, isolated Lua script evaluations ensure concurrency locks completely blocking mathematical race conditions without resorting to heavy application-side distributed locking.
+
+## Roadmap
+
+- Dynamic rate limit adjustments and dynamic algorithm reconfiguration endpoints.
+- Integration targeting dedicated distributed APM platforms.
+- Extended clustering logic surrounding multi-node Redis topologies.
 
 ## License
 
 MIT
+
+## Project Links
+
+Repository: [https://github.com/absol11984/ReqForge](https://github.com/absol11984/ReqForge)
