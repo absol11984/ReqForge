@@ -30,11 +30,15 @@ public class Client {
     @Column(name = "status", nullable = false, length = 32)
     private ClientStatus status = ClientStatus.ACTIVE;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "rate_limit_algorithm", nullable = false, length = 32)
+    private RateLimitAlgorithm algorithm = RateLimitAlgorithm.FIXED_WINDOW;
+
     /** Maximum requests allowed within a single window. */
     @Column(name = "request_limit", nullable = false)
     private int requestLimit;
 
-    /** Length of each fixed window, in seconds. */
+    /** Length of each rate-limit window, in seconds. */
     @Column(name = "window_seconds", nullable = false)
     private int windowSeconds;
 
@@ -48,14 +52,17 @@ public class Client {
         // JPA
     }
 
-    /** Phase 1 constructor — uses default rate-limit values (100 req / 60 s). */
     public Client(String name, String apiKey, ClientStatus status) {
         this(UUID.randomUUID(), name, apiKey, status, 100, 60);
     }
 
-    /** Full constructor used in Phase 2 and tests. */
     public Client(UUID id, String name, String apiKey, ClientStatus status,
                   int requestLimit, int windowSeconds) {
+        this(id, name, apiKey, status, requestLimit, windowSeconds, RateLimitAlgorithm.FIXED_WINDOW);
+    }
+
+    public Client(UUID id, String name, String apiKey, ClientStatus status,
+                  int requestLimit, int windowSeconds, RateLimitAlgorithm algorithm) {
         if (id == null) {
             throw new IllegalArgumentException("id is required");
         }
@@ -63,14 +70,11 @@ public class Client {
         this.name = name;
         this.apiKey = apiKey;
         this.status = status == null ? ClientStatus.ACTIVE : status;
+        this.algorithm = algorithm == null ? RateLimitAlgorithm.FIXED_WINDOW : algorithm;
         this.requestLimit = requestLimit;
         this.windowSeconds = windowSeconds;
     }
 
-    /**
-     * Convenience constructor that keeps Phase 1 tests compiling.
-     * Delegates to the full constructor with default rate-limit values.
-     */
     public Client(UUID id, String name, String apiKey, ClientStatus status) {
         this(id, name, apiKey, status, 100, 60);
     }
@@ -80,29 +84,31 @@ public class Client {
         Instant now = Instant.now();
         if (createdAt == null) createdAt = now;
         if (updatedAt == null) updatedAt = now;
+        if (algorithm == null) algorithm = RateLimitAlgorithm.FIXED_WINDOW;
         if (id == null) id = UUID.randomUUID();
     }
 
     @PreUpdate
     void onPreUpdate() {
         updatedAt = Instant.now();
+        if (algorithm == null) algorithm = RateLimitAlgorithm.FIXED_WINDOW;
     }
-
-    // ── getters ──────────────────────────────────────────────────────────────
 
     public UUID getId() { return id; }
     public String getName() { return name; }
     public String getApiKey() { return apiKey; }
     public ClientStatus getStatus() { return status; }
+    public RateLimitAlgorithm getAlgorithm() {
+        return algorithm == null ? RateLimitAlgorithm.FIXED_WINDOW : algorithm;
+    }
     public int getRequestLimit() { return requestLimit; }
     public int getWindowSeconds() { return windowSeconds; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
 
-    // ── setters (only mutable fields) ────────────────────────────────────────
-
     public void setName(String name) { this.name = name; }
     public void setStatus(ClientStatus status) { this.status = status; }
+    public void setAlgorithm(RateLimitAlgorithm algorithm) { this.algorithm = algorithm; }
     public void setRequestLimit(int requestLimit) { this.requestLimit = requestLimit; }
     public void setWindowSeconds(int windowSeconds) { this.windowSeconds = windowSeconds; }
 }

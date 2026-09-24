@@ -5,6 +5,7 @@ import com.apishield.dto.CreateClientRequest;
 import com.apishield.dto.UpdateClientRequest;
 import com.apishield.entity.Client;
 import com.apishield.entity.ClientStatus;
+import com.apishield.entity.RateLimitAlgorithm;
 import com.apishield.exception.ClientNotFoundException;
 import com.apishield.repository.ClientRepository;
 import org.springframework.stereotype.Service;
@@ -33,14 +34,14 @@ public class ClientService {
         }
 
         String apiKey = generateUniqueApiKey();
-
         Client client = new Client(
                 UUID.randomUUID(),
                 request.name(),
                 apiKey,
                 ClientStatus.ACTIVE,
                 request.requestLimit(),
-                request.windowSeconds()
+                request.windowSeconds(),
+                request.algorithm()
         );
         Client saved = clientRepository.save(client);
         return toResponse(saved);
@@ -75,6 +76,8 @@ public class ClientService {
 
         client.setName(request.name());
         client.setStatus(request.status());
+        client.setAlgorithm(request.algorithm() == null
+                ? RateLimitAlgorithm.FIXED_WINDOW : request.algorithm());
         client.setRequestLimit(request.requestLimit());
         client.setWindowSeconds(request.windowSeconds());
 
@@ -109,6 +112,7 @@ public class ClientService {
                 client.getStatus(),
                 client.getRequestLimit(),
                 client.getWindowSeconds(),
+                client.getAlgorithm(),
                 client.getCreatedAt(),
                 client.getUpdatedAt()
         );

@@ -4,6 +4,7 @@ import com.apishield.dto.ClientResponse;
 import com.apishield.dto.CreateClientRequest;
 import com.apishield.dto.UpdateClientRequest;
 import com.apishield.entity.ClientStatus;
+import com.apishield.entity.RateLimitAlgorithm;
 import com.apishield.exception.ClientNotFoundException;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,6 +36,56 @@ class ClientServiceIntegrationTest {
         assertThat(created.windowSeconds()).isEqualTo(60);
         assertThat(created.createdAt()).isNotNull();
         assertThat(created.updatedAt()).isNotNull();
+        // Phase 4 defaulting
+        assertThat(created.algorithm()).isEqualTo(RateLimitAlgorithm.FIXED_WINDOW);
+    }
+
+    @Test
+    void createClient_persistsAlgorithm_forAllSupportedValues() {
+        ClientResponse fixed = clientService.createClient(
+                new CreateClientRequest("fixed-client", 5, 60, RateLimitAlgorithm.FIXED_WINDOW)
+        );
+        ClientResponse sliding = clientService.createClient(
+                new CreateClientRequest("sliding-client", 5, 60, RateLimitAlgorithm.SLIDING_WINDOW)
+        );
+        ClientResponse bucket = clientService.createClient(
+                new CreateClientRequest("bucket-client", 5, 60, RateLimitAlgorithm.TOKEN_BUCKET)
+        );
+
+        assertThat(clientService.getClientById(fixed.id()).algorithm()).isEqualTo(RateLimitAlgorithm.FIXED_WINDOW);
+        assertThat(clientService.getClientById(sliding.id()).algorithm()).isEqualTo(RateLimitAlgorithm.SLIDING_WINDOW);
+        assertThat(clientService.getClientById(bucket.id()).algorithm()).isEqualTo(RateLimitAlgorithm.TOKEN_BUCKET);
+    }
+
+    @Test
+    void updateClient_persistsAlgorithm_andDefaultsWhenOmitted() {
+        ClientResponse created = clientService.createClient(new CreateClientRequest("client-app"));
+
+        ClientResponse updatedSliding = clientService.updateClient(
+                created.id(),
+                new UpdateClientRequest(
+                        "updated-client",
+                        ClientStatus.ACTIVE,
+                        10,
+                        120,
+                        RateLimitAlgorithm.SLIDING_WINDOW
+                )
+        );
+        assertThat(updatedSliding.algorithm()).isEqualTo(RateLimitAlgorithm.SLIDING_WINDOW);
+        assertThat(clientService.getClientById(created.id()).algorithm()).isEqualTo(RateLimitAlgorithm.SLIDING_WINDOW);
+
+        // Now simulate "omitted" algorithm by passing null.
+        ClientResponse updatedDefault = clientService.updateClient(
+                created.id(),
+                new UpdateClientRequest(
+                        "updated-client-2",
+                        ClientStatus.INACTIVE,
+                        10,
+                        120,
+                        null
+                )
+        );
+        assertThat(updatedDefault.algorithm()).isEqualTo(RateLimitAlgorithm.FIXED_WINDOW);
     }
 
     @Test
@@ -52,7 +103,6 @@ class ClientServiceIntegrationTest {
         );
         assertThat(updated.name()).isEqualTo("updated-client");
         assertThat(updated.status()).isEqualTo(ClientStatus.INACTIVE);
-        // Phase 2 fields from UpdateClientRequest 2-arg constructor
         assertThat(updated.requestLimit()).isEqualTo(100);
         assertThat(updated.windowSeconds()).isEqualTo(60);
 

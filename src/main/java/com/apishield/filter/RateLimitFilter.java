@@ -3,6 +3,7 @@ package com.apishield.filter;
 import com.apishield.dto.RateLimitResult;
 import com.apishield.entity.Client;
 import com.apishield.entity.ClientStatus;
+import com.apishield.entity.RateLimitAlgorithm;
 import com.apishield.exception.ErrorResponse;
 import com.apishield.service.ClientService;
 import com.apishield.service.RateLimitService;
@@ -47,35 +48,31 @@ public class RateLimitFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-
         String apiKey = request.getHeader("X-API-Key");
-
-        // ── missing key ─────────────────────────────────────────────────────
         if (apiKey == null || apiKey.isBlank()) {
             writeError(response, HttpStatus.UNAUTHORIZED, "Unauthorized",
                     "Missing X-API-Key header", request.getRequestURI());
             return;
         }
 
-        // ── unknown key ─────────────────────────────────────────────────────
         Client client = clientService.getClientEntityByApiKey(apiKey);
         if (client == null) {
             writeError(response, HttpStatus.UNAUTHORIZED, "Unauthorized",
                     "Invalid or unknown API key", request.getRequestURI());
             return;
         }
-
-        // ── inactive client ─────────────────────────────────────────────────
         if (client.getStatus() != ClientStatus.ACTIVE) {
             writeError(response, HttpStatus.FORBIDDEN, "Forbidden",
                     "Client is inactive", request.getRequestURI());
             return;
         }
 
-        // ── rate-limit check ────────────────────────────────────────────────
         RateLimitResult result = rateLimitService.checkRateLimit(
-                apiKey, client.getRequestLimit(), client.getWindowSeconds());
-
+                apiKey,
+                client.getRequestLimit(),
+                client.getWindowSeconds(),
+                client.getAlgorithm()
+        );
         if (!result.allowed()) {
             response.setHeader("X-RateLimit-Limit", String.valueOf(result.limit()));
             response.setHeader("X-RateLimit-Remaining", "0");
@@ -86,11 +83,9 @@ public class RateLimitFilter extends OncePerRequestFilter {
             return;
         }
 
-        // ── allowed — set rate-limit headers and continue ───────────────────
         response.setHeader("X-RateLimit-Limit", String.valueOf(result.limit()));
         response.setHeader("X-RateLimit-Remaining", String.valueOf(result.remaining()));
         response.setHeader("X-RateLimit-Reset", String.valueOf(result.resetSeconds()));
-
         filterChain.doFilter(request, response);
     }
 
