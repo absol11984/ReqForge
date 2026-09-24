@@ -47,6 +47,19 @@ public class GlobalExceptionHandler {
                 .body(body);
     }
 
+    @ExceptionHandler(RateLimiterUnavailableException.class)
+    public ResponseEntity<ErrorResponse> handleRateLimiterUnavailable(RateLimiterUnavailableException ex,
+                                                                        HttpServletRequest request) {
+        ErrorResponse body = new ErrorResponse(
+                Instant.now(),
+                HttpStatus.SERVICE_UNAVAILABLE.value(),
+                "Service Unavailable",
+                "Rate limiting service is temporarily unavailable",
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(body);
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException ex, HttpServletRequest request) {
         String message = ex.getBindingResult().getFieldErrors().stream()

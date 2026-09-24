@@ -1,64 +1,73 @@
 package com.apishield.service;
 
 import com.apishield.dto.RateLimitResult;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 
 import java.time.Clock;
-import java.time.Duration;
-import java.util.Set;
+import java.util.List;
 import java.util.UUID;
 
 public class SlidingWindowRateLimitStrategy implements RateLimitStrategy {
 
     private final StringRedisTemplate redisTemplate;
+    private final RedisScript<List> slidingWindowScript;
 
     public SlidingWindowRateLimitStrategy(StringRedisTemplate redisTemplate) {
         this.redisTemplate = redisTemplate;
+
+        DefaultRedisScript<List> script = new DefaultRedisScript<>();
+        script.setLocation(new ClassPathResource("scripts/sliding-window.lua"));
+        // Spring maps Lua table returns to a java.util.List
+        script.setResultType(List.class);
+        this.slidingWindowScript = script;
     }
 
     @Override
     public RateLimitResult check(String apiKey, int requestLimit, int windowSeconds, Clock clock) {
         long now = clock.instant().getEpochSecond();
         String key = "rate_limit:sliding:" + apiKey;
-        ZSetOperations<String, String> operations = redisTemplate.opsForZSet();
 
-        Set<String> oldRequests = operations.rangeByScore(key, Double.NEGATIVE_INFINITY, now - windowSeconds);
-        if (oldRequests != null && !oldRequests.isEmpty()) {
-            operations.remove(key, oldRequests);
-        }
+        // Unique member id per request
+        String memberId = UUID.randomUUID().toString();
 
-        Long size = operations.size(key);
-        long count = size != null ? size : 0;
+        List<?> redisResult = redisTemplate.execute(
+                slidingWindowScript,
+                List.of(key),
+                String.valueOf(now),
+                String.valueOf(windowSeconds),
+                String.valueOf(requestLimit),
+                memberId
+        );
 
-        boolean allowed = count < requestLimit;
+        long allowed = extractLong(redisResult, 0);
+        long remaining = extractLong(redisResult, 1);
+        long resetSeconds = extractLongRounded(redisResult, 2);
 
-        // For remaining we want: limit - (count if allowed==false else count+1)
-        long updatedCount = allowed ? count + 1 : count;
-
-        if (allowed) {
-            operations.add(key, UUID.randomUUID().toString(), now);
-        }
-
-        long remaining = Math.max(0, requestLimit - updatedCount);
-        long resetSeconds = updatedCount > 0
-                ? resetTime(operations, key, now, windowSeconds)
-                : windowSeconds;
-        redisTemplate.expire(key, Duration.ofSeconds(windowSeconds));
-
-        return new RateLimitResult(allowed, requestLimit, remaining, resetSeconds);
+        return new RateLimitResult(allowed == 1, requestLimit, remaining, resetSeconds);
     }
 
-    private long resetTime(ZSetOperations<String, String> operations, String key,
-                           long now, int windowSeconds) {
-        Set<String> members = operations.range(key, 0, 0);
-        if (members == null || members.isEmpty()) {
-            return windowSeconds;
+    private long extractLong(List<?> redisResult, int index) {
+        if (redisResult == null || redisResult.size() <= index || redisResult.get(index) == null) {
+            return 0;
         }
-        Double oldestScore = operations.score(key, members.iterator().next());
-        if (oldestScore == null) {
-            return windowSeconds;
+        Object v = redisResult.get(index);
+        if (v instanceof Number n) {
+            return n.longValue();
         }
-        return Math.max(1, Math.round(oldestScore + windowSeconds - now));
+        return Long.parseLong(String.valueOf(v));
+    }
+
+    private long extractLongRounded(List<?> redisResult, int index) {
+        if (redisResult == null || redisResult.size() <= index || redisResult.get(index) == null) {
+            return 0;
+        }
+        Object v = redisResult.get(index);
+        if (v instanceof Number n) {
+            return Math.round(n.doubleValue());
+        }
+        return Math.round(Double.parseDouble(String.valueOf(v)));
     }
 }

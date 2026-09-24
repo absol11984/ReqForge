@@ -6,6 +6,7 @@ API rate limiting service built with Java 21 and Spring Boot 3.3.2.
 - **Phase 2** — Redis-backed Fixed Window rate limiting
 - **Phase 3** — Centralized `OncePerRequestFilter` for API key validation and rate-limit enforcement
 - **Phase 4** — Multiple configurable rate limiting algorithms per client (Fixed Window, Sliding Window, Token Bucket) via the Strategy Pattern
+- **Phase 5** — Redis Lua atomicity, concurrency tests, fail-closed Redis handling, Micrometer metrics, and masked structured logging
 
 ---
 
@@ -16,7 +17,8 @@ API rate limiting service built with Java 21 and Spring Boot 3.3.2.
 | Language | Java 21 |
 | Framework | Spring Boot 3.3.2 |
 | Persistence | Spring Data JPA + PostgreSQL |
-| Rate limiting | Spring Data Redis (`StringRedisTemplate`) |
+| Rate limiting | Spring Data Redis (`StringRedisTemplate` + Lua scripts) |
+| Observability | Spring Boot Actuator + Micrometer |
 | Validation | Jakarta Bean Validation |
 | API docs | springdoc-openapi 2.6.0 (Swagger UI) |
 | Tests | JUnit 5 + Mockito + MockMvc + H2 |
@@ -56,7 +58,9 @@ mvn spring-boot:run
 ```
 
 Swagger UI: http://localhost:8080/swagger-ui.html  
-OpenAPI JSON: http://localhost:8080/v3/api-docs
+OpenAPI JSON: http://localhost:8080/v3/api-docs  
+Health: http://localhost:8080/actuator/health  
+Metrics: http://localhost:8080/actuator/metrics
 
 ### Tests
 
@@ -292,11 +296,64 @@ FixedWindowRateLimitStrategy   SlidingWindowRateLimitStrategy   TokenBucketRateL
 
 ### Known Concurrency / Atomicity Limitations
 
-In Phase 4, the Sliding Window and Token Bucket algorithms execute multiple sequential Redis commands over the network (read → compute → write) without Lua scripts or multi-exec transactions:
-- **Sliding Window**: Purging old entries, querying ZSET size, and adding the new timestamp member occur as separate Redis commands. Under heavy concurrent load on the exact same API key, a race condition can allow slightly more requests than `requestLimit`.
-- **Token Bucket**: Reading `tokens` and `lastRefillSeconds`, computing refill/consumption, and writing back updated values occur across separate `HGET` / `HSET` calls. Under concurrent requests, simultaneous reads can read the same token count and both consume it (lost update race condition).
+Phase 4 executed Sliding Window and Token Bucket as multiple sequential Redis commands (read → compute → write). Under concurrent load that could over-admit requests. **Phase 5 replaces those multi-command sequences with atomic Lua scripts.** See [Phase 5](#phase-5--concurrency--production-hardening).
 
-These multi-command operations do not provide distributed atomicity in Phase 4. Distributed atomic enforcement using Redis Lua scripts is deferred to subsequent phases.
+---
+
+## Phase 5 – Concurrency & Production Hardening
+
+Phase 5 makes rate limiting production-safe: every algorithm runs as a single atomic Redis Lua script, Redis outages fail closed with HTTP 503, and the filter emits Micrometer counters plus masked structured logs.
+
+### Redis Atomicity via Lua Scripts
+
+Each strategy loads a `DefaultRedisScript` from `src/main/resources/scripts/` and executes it with `StringRedisTemplate.execute(...)`. Redis runs the script as one EVAL, so concurrent requests on the same key cannot interleave mid-check.
+
+| Algorithm | Script | Atomic operations | Return |
+|---|---|---|---|
+| **Fixed Window** | `fixed-window.lua` | `INCR`; if count == 1 then `EXPIRE` | current count |
+| **Sliding Window** | `sliding-window.lua` | `ZREMRANGEBYSCORE` → `ZCARD` → conditional `ZADD` + `EXPIRE` | `{allowed, remaining, resetSeconds}` |
+| **Token Bucket** | `token-bucket.lua` | `HGET` tokens/lastRefill → refill → consume → `HSET` + `EXPIRE` | `{allowed, remaining, resetSeconds}` |
+
+Fixed Window Lua also closes the crash window between `INCR` and `EXPIRE` that existed when those were two separate commands.
+
+### Concurrent Request Handling
+
+`RateLimitConcurrencyTest` fires 50 concurrent requests (16-thread pool, `CountDownLatch` start barrier) against a limit of 10 for each algorithm. The mock Redis answer is synchronized so it emulates Lua atomicity; exactly 10 requests are allowed and 40 are rejected.
+
+### Redis Failure Handling (Fail-Closed)
+
+Protected endpoints never fail open. If Redis is down:
+
+1. Strategy / `RateLimitService` wraps `DataAccessException` (and unexpected runtime Redis errors) as `RateLimiterUnavailableException`.
+2. `RateLimitFilter` catches that exception (and `DataAccessException`) and writes HTTP **503 Service Unavailable**.
+3. Body is the standard `ErrorResponse` with message `"Rate limiting service is temporarily unavailable"` — no stack traces or Redis details leak to the client.
+4. Client management (`/api/clients`), Swagger, and Actuator paths are excluded from the filter, so operators can still manage clients and inspect health while Redis is down.
+
+`GlobalExceptionHandler` also maps `RateLimiterUnavailableException` → 503 for any controller-thrown case.
+
+### Observability
+
+Spring Boot Actuator exposes `/actuator/health` (Redis health indicator enabled, details hidden) and `/actuator/metrics`. `RateLimitFilter` registers six Micrometer counters:
+
+| Counter | When |
+|---|---|
+| `ratelimit.requests.total` | Every protected request |
+| `ratelimit.requests.allowed` | Under limit, forwarded to controller |
+| `ratelimit.requests.rejected` | HTTP 429 |
+| `ratelimit.errors.invalid_key` | Missing or unknown `X-API-Key` |
+| `ratelimit.errors.inactive_client` | Client `status = INACTIVE` |
+| `ratelimit.errors.redis_failure` | Redis unavailable → 503 |
+
+### Structured Logging
+
+Filter logs use SLF4J with API keys masked as `ask_***` (`substring(0, 4) + "***"`). Events logged: missing/invalid key, inactive client, Redis failure, and rate-limit exceeded. Full keys never appear in logs.
+
+### Remaining Limitations
+
+- Lua scripts are atomic **per key**. They do not coordinate across keys or across Redis cluster slots.
+- Token Bucket refill is still lazy (computed on request); there is no background refill job.
+- Concurrency tests emulate Lua with a synchronized in-memory mock; they do not require a live Redis. End-to-end Redis EVAL behavior should be verified in a deployed environment.
+- Actuator is unauthenticated in this phase; lock it down before exposing it on a public network.
 
 ---
 
@@ -326,6 +383,7 @@ src/main/java/com/apishield/
     ClientInactiveException.java
     InvalidApiKeyException.java
     RateLimitExceededException.java
+    RateLimiterUnavailableException.java
     GlobalExceptionHandler.java
     ErrorResponse.java
   filter/
@@ -340,13 +398,11 @@ src/main/java/com/apishield/
     FixedWindowRateLimitStrategy.java
     SlidingWindowRateLimitStrategy.java
     TokenBucketRateLimitStrategy.java
+src/main/resources/scripts/
+  fixed-window.lua
+  sliding-window.lua
+  token-bucket.lua
 ```
-
----
-
-## License
-
-MIT
 
 ---
 
