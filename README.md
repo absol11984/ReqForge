@@ -7,6 +7,7 @@ API rate limiting service built with Java 21 and Spring Boot 3.3.2.
 - **Phase 3** — Centralized `OncePerRequestFilter` for API key validation and rate-limit enforcement
 - **Phase 4** — Multiple configurable rate limiting algorithms per client (Fixed Window, Sliding Window, Token Bucket) via the Strategy Pattern
 - **Phase 5** — Redis Lua atomicity, concurrency tests, fail-closed Redis handling, Micrometer metrics, and masked structured logging
+- **Phase 6** — Docker Compose deployment, real end-to-end Testcontainers integration tests, and GitHub Actions CI
 
 ---
 
@@ -403,6 +404,45 @@ src/main/resources/scripts/
   sliding-window.lua
   token-bucket.lua
 ```
+
+---
+
+## Phase 6 — Dockerization, E2E Testing, and CI/CD
+
+Phase 6 hardens the project for deployment by containerizing the application, replacing mocked integration tests with real end-to-end tests using Testcontainers, and wiring up GitHub Actions.
+
+### Docker Compose
+
+The `docker-compose.yml` orchestrates the full stack in a custom bridge network (`apishield-network`):
+- **`db`**: PostgreSQL 15 alpine image
+- **`redis`**: Redis 7 alpine image
+- **`api`**: ReqForge API (built via multi-stage `Dockerfile`)
+
+**Features:**
+- **Healthchecks**: The API container waits for PostgreSQL (`pg_isready`) and Redis (`redis-cli ping`) to be healthy before starting. The API container itself uses Spring Boot Actuator (`/actuator/health`) for its own healthcheck.
+- **Security**: The API runs as a non-root user (`appuser` inside `appgroup`).
+- **Configuration**: Uses `.env` for secrets (copy `.env.example` to start).
+
+```bash
+docker compose up -d --build
+```
+
+### End-to-End Testing (Testcontainers)
+
+`BaseIntegrationTest` spins up real PostgreSQL and Redis containers using Testcontainers before the Spring context loads.
+
+- Tests run with the `container-test` profile.
+- `@DynamicPropertySource` dynamically points the Spring Datasource and Redis connection properties to the ephemeral Testcontainers ports.
+- **`RateLimitE2ETest`** uses `RestAssured` to send physical HTTP requests to a randomly mapped port, verifying the full rate-limiting flow end-to-end (including boundary alignment waits to ensure deterministic results).
+- Also verifies the fail-closed Redis behavior by explicitly stopping the Redis container and checking for a 503 response.
+
+```bash
+mvn clean test
+```
+
+### GitHub Actions (CI)
+
+A workflow at `.github/workflows/ci.yml` runs on every push and pull request to `main`. It checks out the code, sets up JDK 21 (Temurin) with Maven caching, and executes `mvn clean test`. The Testcontainers library automatically detects the GitHub Actions Docker environment and spins up the required databases for the integration tests.
 
 ---
 
