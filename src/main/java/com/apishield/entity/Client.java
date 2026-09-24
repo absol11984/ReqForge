@@ -30,6 +30,14 @@ public class Client {
     @Column(name = "status", nullable = false, length = 32)
     private ClientStatus status = ClientStatus.ACTIVE;
 
+    /** Maximum requests allowed within a single window. */
+    @Column(name = "request_limit", nullable = false)
+    private int requestLimit;
+
+    /** Length of each fixed window, in seconds. */
+    @Column(name = "window_seconds", nullable = false)
+    private int windowSeconds;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -40,11 +48,14 @@ public class Client {
         // JPA
     }
 
+    /** Phase 1 constructor — uses default rate-limit values (100 req / 60 s). */
     public Client(String name, String apiKey, ClientStatus status) {
-        this(UUID.randomUUID(), name, apiKey, status);
+        this(UUID.randomUUID(), name, apiKey, status, 100, 60);
     }
 
-    public Client(UUID id, String name, String apiKey, ClientStatus status) {
+    /** Full constructor used in Phase 2 and tests. */
+    public Client(UUID id, String name, String apiKey, ClientStatus status,
+                  int requestLimit, int windowSeconds) {
         if (id == null) {
             throw new IllegalArgumentException("id is required");
         }
@@ -52,20 +63,24 @@ public class Client {
         this.name = name;
         this.apiKey = apiKey;
         this.status = status == null ? ClientStatus.ACTIVE : status;
+        this.requestLimit = requestLimit;
+        this.windowSeconds = windowSeconds;
+    }
+
+    /**
+     * Convenience constructor that keeps Phase 1 tests compiling.
+     * Delegates to the full constructor with default rate-limit values.
+     */
+    public Client(UUID id, String name, String apiKey, ClientStatus status) {
+        this(id, name, apiKey, status, 100, 60);
     }
 
     @PrePersist
     void onPrePersist() {
         Instant now = Instant.now();
-        if (createdAt == null) {
-            createdAt = now;
-        }
-        if (updatedAt == null) {
-            updatedAt = now;
-        }
-        if (id == null) {
-            id = UUID.randomUUID();
-        }
+        if (createdAt == null) createdAt = now;
+        if (updatedAt == null) updatedAt = now;
+        if (id == null) id = UUID.randomUUID();
     }
 
     @PreUpdate
@@ -73,35 +88,21 @@ public class Client {
         updatedAt = Instant.now();
     }
 
-    public UUID getId() {
-        return id;
-    }
+    // ── getters ──────────────────────────────────────────────────────────────
 
-    public String getName() {
-        return name;
-    }
+    public UUID getId() { return id; }
+    public String getName() { return name; }
+    public String getApiKey() { return apiKey; }
+    public ClientStatus getStatus() { return status; }
+    public int getRequestLimit() { return requestLimit; }
+    public int getWindowSeconds() { return windowSeconds; }
+    public Instant getCreatedAt() { return createdAt; }
+    public Instant getUpdatedAt() { return updatedAt; }
 
-    public String getApiKey() {
-        return apiKey;
-    }
+    // ── setters (only mutable fields) ────────────────────────────────────────
 
-    public ClientStatus getStatus() {
-        return status;
-    }
-
-    public Instant getCreatedAt() {
-        return createdAt;
-    }
-
-    public Instant getUpdatedAt() {
-        return updatedAt;
-    }
-
-    public void setName(String name) {
-        this.name = name;
-    }
-
-    public void setStatus(ClientStatus status) {
-        this.status = status;
-    }
+    public void setName(String name) { this.name = name; }
+    public void setStatus(ClientStatus status) { this.status = status; }
+    public void setRequestLimit(int requestLimit) { this.requestLimit = requestLimit; }
+    public void setWindowSeconds(int windowSeconds) { this.windowSeconds = windowSeconds; }
 }

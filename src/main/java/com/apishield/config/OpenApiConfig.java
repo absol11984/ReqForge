@@ -12,7 +12,7 @@ import org.springframework.context.annotation.Configuration;
         info = @Info(
                 title = "APIShield",
                 version = "0.1.0",
-                description = "API rate limiting service - Phase 1 client management",
+                description = "API rate limiting service — Phase 1 client management, Phase 2 Redis fixed-window rate limiting",
                 contact = @Contact(name = "APIShield", url = "https://example.com", email = "no-reply@example.com"),
                 license = @License(name = "MIT")
         ),

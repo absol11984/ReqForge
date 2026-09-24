@@ -15,7 +15,7 @@
   <artifactId>apishield</artifactId>
   <version>0.1.0</version>
   <name>APIShield</name>
-  <description>API Rate Limiting Service - Phase 1 client management</description>
+  <description>API Rate Limiting Service — Phase 1 client management, Phase 2 Redis fixed-window rate limiting</description>
 
   <properties>
     <java.version>21</java.version>
@@ -23,6 +23,11 @@
   </properties>
 
   <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-redis</artifactId>
+    </dependency>
+
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>

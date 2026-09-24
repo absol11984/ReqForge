@@ -34,7 +34,14 @@ public class ClientService {
 
         String apiKey = generateUniqueApiKey();
 
-        Client client = new Client(request.name(), apiKey, ClientStatus.ACTIVE);
+        Client client = new Client(
+                UUID.randomUUID(),
+                request.name(),
+                apiKey,
+                ClientStatus.ACTIVE,
+                request.requestLimit(),
+                request.windowSeconds()
+        );
         Client saved = clientRepository.save(client);
         return toResponse(saved);
     }
@@ -51,6 +58,12 @@ public class ClientService {
         return toResponse(client);
     }
 
+    @Transactional(readOnly = true)
+    public Client getClientEntityByApiKey(String apiKey) {
+        return clientRepository.findByApiKey(apiKey)
+                .orElse(null);
+    }
+
     @Transactional
     public ClientResponse updateClient(UUID id, UpdateClientRequest request) {
         if (request == null) {
@@ -62,6 +75,8 @@ public class ClientService {
 
         client.setName(request.name());
         client.setStatus(request.status());
+        client.setRequestLimit(request.requestLimit());
+        client.setWindowSeconds(request.windowSeconds());
 
         Client saved = clientRepository.save(client);
         return toResponse(saved);
@@ -92,6 +107,8 @@ public class ClientService {
                 client.getName(),
                 client.getApiKey(),
                 client.getStatus(),
+                client.getRequestLimit(),
+                client.getWindowSeconds(),
                 client.getCreatedAt(),
                 client.getUpdatedAt()
         );

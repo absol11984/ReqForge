@@ -1,5 +1,6 @@
 package com.apishield.exception;
 
+import com.apishield.dto.RateLimitResult;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -16,6 +17,34 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(ClientNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleClientNotFound(ClientNotFoundException ex, HttpServletRequest request) {
         return buildError(HttpStatus.NOT_FOUND, "Client Not Found", ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(InvalidApiKeyException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidApiKey(InvalidApiKeyException ex, HttpServletRequest request) {
+        return buildError(HttpStatus.UNAUTHORIZED, "Unauthorized", ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(ClientInactiveException.class)
+    public ResponseEntity<ErrorResponse> handleClientInactive(ClientInactiveException ex, HttpServletRequest request) {
+        return buildError(HttpStatus.FORBIDDEN, "Forbidden", ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(RateLimitExceededException.class)
+    public ResponseEntity<ErrorResponse> handleRateLimitExceeded(RateLimitExceededException ex, HttpServletRequest request) {
+        RateLimitResult result = ex.getRateLimitResult();
+        ErrorResponse body = new ErrorResponse(
+                Instant.now(),
+                HttpStatus.TOO_MANY_REQUESTS.value(),
+                "Too Many Requests",
+                ex.getMessage(),
+                request.getRequestURI()
+        );
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header("X-RateLimit-Limit", String.valueOf(result.limit()))
+                .header("X-RateLimit-Remaining", String.valueOf(result.remaining()))
+                .header("X-RateLimit-Reset", String.valueOf(result.resetSeconds()))
+                .header("Retry-After", String.valueOf(result.resetSeconds()))
+                .body(body);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

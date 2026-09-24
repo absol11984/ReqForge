@@ -45,6 +45,8 @@ class ClientControllerTest {
                 "client-app",
                 "ask_live_key",
                 ClientStatus.ACTIVE,
+                100,  // requestLimit
+                60,   // windowSeconds
                 Instant.parse("2026-09-23T19:00:00Z"),
                 Instant.parse("2026-09-23T19:00:00Z")
         );
@@ -60,7 +62,9 @@ class ClientControllerTest {
                 .andExpect(jsonPath("$.id", is(id.toString())))
                 .andExpect(jsonPath("$.name", is("client-app")))
                 .andExpect(jsonPath("$.apiKey", is("ask_live_key")))
-                .andExpect(jsonPath("$.status", is("ACTIVE")));
+                .andExpect(jsonPath("$.status", is("ACTIVE")))
+                .andExpect(jsonPath("$.requestLimit", is(100)))
+                .andExpect(jsonPath("$.windowSeconds", is(60)));
     }
 
     @Test
@@ -70,6 +74,7 @@ class ClientControllerTest {
                 "client-1",
                 "ask_live_1",
                 ClientStatus.ACTIVE,
+                100, 60,
                 Instant.parse("2026-09-23T19:00:00Z"),
                 Instant.parse("2026-09-23T19:00:00Z")
         );
@@ -78,6 +83,7 @@ class ClientControllerTest {
                 "client-2",
                 "ask_live_2",
                 ClientStatus.INACTIVE,
+                50, 30,
                 Instant.parse("2026-09-23T19:01:00Z"),
                 Instant.parse("2026-09-23T19:01:00Z")
         );
@@ -99,6 +105,7 @@ class ClientControllerTest {
                 "client-app",
                 "ask_live_key",
                 ClientStatus.ACTIVE,
+                100, 60,
                 Instant.parse("2026-09-23T19:00:00Z"),
                 Instant.parse("2026-09-23T19:00:00Z")
         );
@@ -119,6 +126,7 @@ class ClientControllerTest {
                 "updated-client",
                 "ask_live_key",
                 ClientStatus.ACTIVE,
+                100, 60,
                 Instant.parse("2026-09-23T19:00:00Z"),
                 Instant.parse("2026-09-23T19:10:00Z")
         );

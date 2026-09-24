@@ -30,6 +30,9 @@ class ClientServiceIntegrationTest {
         assertThat(created.name()).isEqualTo("client-app");
         assertThat(created.apiKey()).startsWith("ask_live_");
         assertThat(created.status()).isEqualTo(ClientStatus.ACTIVE);
+        // Phase 2 fields
+        assertThat(created.requestLimit()).isEqualTo(100);
+        assertThat(created.windowSeconds()).isEqualTo(60);
         assertThat(created.createdAt()).isNotNull();
         assertThat(created.updatedAt()).isNotNull();
     }
@@ -40,6 +43,8 @@ class ClientServiceIntegrationTest {
 
         ClientResponse fetched = clientService.getClientById(created.id());
         assertThat(fetched.name()).isEqualTo("client-app");
+        assertThat(fetched.requestLimit()).isEqualTo(100);
+        assertThat(fetched.windowSeconds()).isEqualTo(60);
 
         ClientResponse updated = clientService.updateClient(
                 created.id(),
@@ -47,6 +52,9 @@ class ClientServiceIntegrationTest {
         );
         assertThat(updated.name()).isEqualTo("updated-client");
         assertThat(updated.status()).isEqualTo(ClientStatus.INACTIVE);
+        // Phase 2 fields from UpdateClientRequest 2-arg constructor
+        assertThat(updated.requestLimit()).isEqualTo(100);
+        assertThat(updated.windowSeconds()).isEqualTo(60);
 
         clientService.deleteClient(created.id());
         assertThatThrownBy(() -> clientService.getClientById(created.id()))

@@ -48,13 +48,16 @@ class ClientServiceTest {
         assertThat(response.name()).isEqualTo("client-app");
         assertThat(response.apiKey()).startsWith("ask_live_");
         assertThat(response.status()).isEqualTo(ClientStatus.ACTIVE);
+        // New Phase 2 checks
+        assertThat(response.requestLimit()).isEqualTo(100);  // default from CreateClientRequest 1-arg constructor
+        assertThat(response.windowSeconds()).isEqualTo(60);
         verify(clientRepository).save(any(Client.class));
     }
 
     @Test
     void getClient() {
         UUID id = UUID.randomUUID();
-        Client client = new Client(id, "client-app", "ask_live_testkey", ClientStatus.ACTIVE);
+        Client client = new Client(id, "client-app", "ask_live_testkey", ClientStatus.ACTIVE, 100, 60);
 
         when(clientRepository.findById(id)).thenReturn(Optional.of(client));
 
@@ -64,12 +67,14 @@ class ClientServiceTest {
         assertThat(response.name()).isEqualTo("client-app");
         assertThat(response.apiKey()).isEqualTo("ask_live_testkey");
         assertThat(response.status()).isEqualTo(ClientStatus.ACTIVE);
+        assertThat(response.requestLimit()).isEqualTo(100);
+        assertThat(response.windowSeconds()).isEqualTo(60);
     }
 
     @Test
     void updateClient() {
         UUID id = UUID.randomUUID();
-        Client existing = new Client(id, "old-name", "ask_live_old", ClientStatus.INACTIVE);
+        Client existing = new Client(id, "old-name", "ask_live_old", ClientStatus.INACTIVE, 50, 30);
 
         when(clientRepository.findById(id)).thenReturn(Optional.of(existing));
         when(clientRepository.save(any(Client.class))).thenAnswer(invocation -> invocation.getArgument(0));
@@ -81,6 +86,9 @@ class ClientServiceTest {
         assertThat(response.id()).isEqualTo(id);
         assertThat(response.name()).isEqualTo("updated-client");
         assertThat(response.status()).isEqualTo(ClientStatus.ACTIVE);
+        // Updated values from UpdateClientRequest 2-arg constructor
+        assertThat(response.requestLimit()).isEqualTo(100);  // default from UpdateClientRequest 2-arg constructor
+        assertThat(response.windowSeconds()).isEqualTo(60);
     }
 
     @Test

@@ -1,28 +1,21 @@
 package com.apishield.dto;
 
 import com.apishield.entity.ClientStatus;
-import io.swagger.v3.oas.annotations.media.Schema;
-
 import java.time.Instant;
 import java.util.UUID;
 
 public record ClientResponse(
-        @Schema(description = "Client id")
         UUID id,
-
-        @Schema(description = "Client display name")
         String name,
-
-        @Schema(description = "Generated API key")
         String apiKey,
-
-        @Schema(description = "Client status")
         ClientStatus status,
-
-        @Schema(description = "Creation time")
+        int requestLimit,
+        int windowSeconds,
         Instant createdAt,
-
-        @Schema(description = "Last update time")
         Instant updatedAt
 ) {
+    // Keep a constructor for backwards compatibility with tests that don't pass limits
+    public ClientResponse(UUID id, String name, String apiKey, ClientStatus status, Instant createdAt, Instant updatedAt) {
+        this(id, name, apiKey, status, 100, 60, createdAt, updatedAt);
+    }
 }
